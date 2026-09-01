@@ -1,0 +1,14 @@
+alembic==1.19.1
+bcrypt==4.0.1
+email-validator==2.3.0
+fastapi==0.141.1
+passlib==1.7.4
+psycopg2-binary==2.9.12
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic_core==2.46.5
+python-dotenv==1.2.2
+python-jose==3.5.0
+razorpay==2.0.1
+SQLAlchemy==2.0.52
+uvicorn==0.52.4
