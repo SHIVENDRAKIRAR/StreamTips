@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>StreamTips Overlay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    background: transparent;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  #alert-container {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 480px;
+  }
+
+  .alert-card {
+    background: linear-gradient(135deg, rgba(23,23,31,0.96), rgba(30,20,45,0.96));
+    border: 2px solid #7c5cff;
+    border-radius: 20px;
+    padding: 28px 32px;
+    box-shadow: 0 0 40px rgba(124,92,255,0.6), 0 20px 60px rgba(0,0,0,0.5);
+    text-align: center;
+    opacity: 0;
+    transform: scale(0.7) translateY(20px);
+    transition: none;
+  }
+
+  .alert-card.enter {
+    animation: pop-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+
+  .alert-card.leave {
+    animation: fade-out 0.4s ease-in forwards;
+  }
+
+  @keyframes pop-in {
+    0%   { opacity: 0; transform: scale(0.6) translateY(30px); }
+    60%  { opacity: 1; transform: scale(1.05) translateY(-4px); }
+    100% { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  @keyframes fade-out {
+    0%   { opacity: 1; transform: scale(1) translateY(0); }
+    100% { opacity: 0; transform: scale(0.85) translateY(-16px); }
+  }
+
+  .alert-badge {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    color: #7c5cff;
+    text-shadow: 0 0 12px rgba(124,92,255,0.8);
+    margin-bottom: 10px;
+  }
+
+  .alert-name {
+    font-size: 28px;
+    font-weight: 800;
+    color: #ffffff;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+  }
+
+  .alert-amount {
+    font-size: 22px;
+    font-weight: 700;
+    color: #2fd480;
+    text-shadow: 0 0 16px rgba(47,212,128,0.5);
+    margin-top: 4px;
+  }
+
+  .alert-message {
+    margin-top: 14px;
+    font-size: 16px;
+    color: #d8d8e2;
+    font-style: italic;
+    line-height: 1.4;
+    word-wrap: break-word;
+  }
+
+  /* Small connection indicator — visible only when debugging in a normal
+     browser tab; harmless if it shows in OBS too, but kept subtle. */
+  #conn-indicator {
+    position: fixed;
+    bottom: 8px;
+    left: 8px;
+    font-size: 10px;
+    font-family: monospace;
+    color: rgba(255,255,255,0.25);
+  }
+</style>
+</head>
+<body>
+
+<div id="alert-container"></div>
+<div id="conn-indicator">connecting…</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────
+// Point this at your deployed API when you move off localhost.
+const API_WS_BASE = "ws://localhost:8000";
+const ALERT_DISPLAY_MS = 6000;      // how long an alert stays on screen
+const RECONNECT_DELAY_MS = 3000;    // wait before retrying a dropped connection
+
+const params = new URLSearchParams(window.location.search);
+const token = params.get("token");
+
+const container = document.getElementById("alert-container");
+const connIndicator = document.getElementById("conn-indicator");
+
+if (!token) {
+  connIndicator.textContent = "missing ?token=";
+}
+
+// ── Alert queue ─────────────────────────────────────────────────────
+// If tips arrive close together, we don't want them to overlap or
+// interrupt each other mid-animation — queue and show one at a time.
+const queue = [];
+let showing = false;
+
+function enqueueTip(tip) {
+  queue.push(tip);
+  processQueue();
+}
+
+function processQueue() {
+  if (showing || queue.length === 0) return;
+  showing = true;
+  const tip = queue.shift();
+  renderAlert(tip, () => {
+    showing = false;
+    processQueue();
+  });
+}
+
+function renderAlert(tip, onDone) {
+  const card = document.createElement("div");
+  card.className = "alert-card";
+
+  const amount = Number(tip.amount).toLocaleString("en-IN");
+  const safeName = escapeHtml(tip.name || "Anonymous");
+  const safeMessage = tip.message ? escapeHtml(tip.message) : "";
+
+  card.innerHTML = `
+    <div class="alert-badge">NEW TIP</div>
+    <div class="alert-name">${safeName}</div>
+    <div class="alert-amount">₹${amount}</div>
+    ${safeMessage ? `<div class="alert-message">"${safeMessage}"</div>` : ""}
+  `;
+
+  container.innerHTML = "";
+  container.appendChild(card);
+
+  requestAnimationFrame(() => card.classList.add("enter"));
+
+  setTimeout(() => {
+    card.classList.remove("enter");
+    card.classList.add("leave");
+    setTimeout(() => {
+      card.remove();
+      onDone();
+    }, 400); // matches fade-out animation duration
+  }, ALERT_DISPLAY_MS);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── WebSocket connection with auto-reconnect ──────────────────────
+// OBS Browser Sources can reload unpredictably (scene switches, OBS
+// restarts) and network blips happen mid-stream. The overlay must
+// recover on its own — a streamer mid-broadcast isn't going to
+// manually refresh a browser source.
+let ws = null;
+let reconnectTimer = null;
+
+function connect() {
+  if (!token) return;
+
+  ws = new WebSocket(`${API_WS_BASE}/ws/overlay/${token}`);
+
+  ws.onopen = () => {
+    connIndicator.textContent = "connected";
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === "TIP") {
+        enqueueTip(data);
+      }
+    } catch (e) {
+      // Ignore malformed messages rather than crashing the overlay
+      // mid-stream — a bad message should never take down the alert loop.
+    }
+  };
+
+  ws.onclose = () => {
+    connIndicator.textContent = "reconnecting…";
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => {
+    ws.close(); // triggers onclose -> scheduleReconnect
+  };
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return; // already scheduled
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, RECONNECT_DELAY_MS);
+}
+
+connect();
+</script>
+
+</body>
+</html>

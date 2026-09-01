@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>StreamTips — WS Test</title>
+<style>
+  body { font-family: monospace; background: #111; color: #0f0; padding: 24px; }
+  #log { white-space: pre-wrap; }
+  .status { color: #ff0; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="status" id="status">Connecting...</div>
+<div id="log"></div>
+
+<script>
+// Day 4 sanity check only — the real styled overlay comes in Day 5.
+// Usage: ws_test.html?token=<your-overlay-token>
+const API_WS_BASE = "ws://localhost:8000";
+const params = new URLSearchParams(window.location.search);
+const token = params.get("token");
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+
+if (!token) {
+  statusEl.textContent = "Add ?token=<overlay_token> to the URL";
+} else {
+  const ws = new WebSocket(`${API_WS_BASE}/ws/overlay/${token}`);
+
+  ws.onopen = () => { statusEl.textContent = "Connected. Waiting for tips..."; };
+  ws.onclose = (e) => { statusEl.textContent = `Disconnected (code ${e.code}). Refresh to retry.`; };
+  ws.onerror = () => { statusEl.textContent = "Connection error."; };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    const line = `[${new Date().toLocaleTimeString()}] ${JSON.stringify(data)}\n`;
+    logEl.textContent = line + logEl.textContent;
+  };
+}
+</script>
+</body>
+</html>

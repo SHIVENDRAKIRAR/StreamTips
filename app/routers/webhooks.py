@@ -5,8 +5,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Tip, TipStatus, WebhookEvent
+from app.models import Tip, TipStatus, WebhookEvent, User
 from app.services.razorpay_service import verify_webhook_signature
+from app.services.connection_manager import manager
 
 logger = logging.getLogger("streamtips.webhooks")
 
@@ -103,7 +104,22 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     event_row.processed = True
     db.commit()
 
-    # Day 4 hook point: broadcast this tip over WebSocket to the
-    # creator's overlay connection here, after commit succeeds.
+    # Broadcast to the OBS overlay, if one is currently connected.
+    # Deliberately happens AFTER commit — the DB write is the source of
+    # truth regardless of whether anyone was watching live. If the
+    # overlay was offline, the tip is still recorded as successful;
+    # it just won't show a live alert. No retry/queue for missed
+    # alerts in V1 — that's an acceptable, documented scope cut.
+    creator = db.query(User).filter(User.id == tip.user_id).first()
+    if creator:
+        await manager.send_to_overlay(
+            creator.overlay_token,
+            {
+                "type": "TIP",
+                "name": tip.payer_name,
+                "amount": float(tip.amount),
+                "message": tip.message,
+            },
+        )
 
     return {"status": "processed", "tip_id": str(tip.id)}
