@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>StreamTips</title>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<style>
+  :root {
+    --bg: #0f0f14;
+    --card: #17171f;
+    --border: #262632;
+    --text: #f2f2f7;
+    --muted: #8b8b99;
+    --accent: #7c5cff;
+    --accent-hover: #6a48ff;
+    --success: #2fd480;
+    --error: #ff5c7a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at top, #1c1c28 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 32px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  }
+  .avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), #ff5c9e);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0 auto 16px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 20px;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+    margin: 0 0 28px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin: 16px 0 6px;
+  }
+  input, textarea {
+    width: 100%;
+    background: #1e1e29;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: none; min-height: 64px; }
+  .amounts {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .amount-btn {
+    background: #1e1e29;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 10px 0;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .amount-btn.active, .amount-btn:hover {
+    border-color: var(--accent);
+    background: rgba(124,92,255,0.12);
+  }
+  .pay-btn {
+    width: 100%;
+    margin-top: 26px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .pay-btn:hover { background: var(--accent-hover); }
+  .pay-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status {
+    margin-top: 16px;
+    text-align: center;
+    font-size: 13px;
+    min-height: 18px;
+  }
+  .status.success { color: var(--success); }
+  .status.error { color: var(--error); }
+  .footer-note {
+    text-align: center;
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 20px;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="avatar" id="avatarInitial">?</div>
+  <h1 id="creatorName">Loading…</h1>
+  <p class="subtitle">Support this creator ❤️</p>
+
+  <label for="payerName">Your name</label>
+  <input id="payerName" type="text" placeholder="Anonymous" maxlength="100" />
+
+  <label for="message">Message (optional)</label>
+  <textarea id="message" placeholder="Say something nice…" maxlength="500"></textarea>
+
+  <label>Amount (₹)</label>
+  <div class="amounts" id="amountButtons">
+    <button class="amount-btn" data-amount="40">₹40</button>
+    <button class="amount-btn" data-amount="100">₹100</button>
+    <button class="amount-btn" data-amount="500">₹500</button>
+    <button class="amount-btn" data-amount="1000">₹1000</button>
+  </div>
+  <input id="customAmount" type="number" placeholder="Or enter custom amount" min="1" style="margin-top:8px;" />
+
+  <button class="pay-btn" id="payBtn">Send Tip</button>
+  <div class="status" id="status"></div>
+
+  <p class="footer-note">Payments secured by Razorpay · Test mode</p>
+</div>
+
+<script>
+// Change this to your deployed API URL when you move off localhost
+const API_BASE = "http://localhost:8000";
+
+const params = new URLSearchParams(window.location.search);
+const username = params.get("creator") || "demo";
+
+let selectedAmount = null;
+
+const creatorNameEl = document.getElementById("creatorName");
+const avatarEl = document.getElementById("avatarInitial");
+const statusEl = document.getElementById("status");
+const payBtn = document.getElementById("payBtn");
+const customAmountInput = document.getElementById("customAmount");
+
+async function loadCreator() {
+  try {
+    const res = await fetch(`${API_BASE}/creators/${username}`);
+    if (!res.ok) throw new Error("Creator not found");
+    const data = await res.json();
+    creatorNameEl.textContent = data.display_name;
+    avatarEl.textContent = data.display_name.charAt(0).toUpperCase();
+  } catch (err) {
+    creatorNameEl.textContent = "Creator not found";
+    payBtn.disabled = true;
+  }
+}
+
+document.querySelectorAll(".amount-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".amount-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    selectedAmount = parseFloat(btn.dataset.amount);
+    customAmountInput.value = "";
+  });
+});
+
+customAmountInput.addEventListener("input", () => {
+  document.querySelectorAll(".amount-btn").forEach(b => b.classList.remove("active"));
+  selectedAmount = parseFloat(customAmountInput.value) || null;
+});
+
+function setStatus(msg, type) {
+  statusEl.textContent = msg;
+  statusEl.className = "status" + (type ? " " + type : "");
+}
+
+payBtn.addEventListener("click", async () => {
+  if (!selectedAmount || selectedAmount <= 0) {
+    setStatus("Pick or enter an amount first.", "error");
+    return;
+  }
+
+  const payerName = document.getElementById("payerName").value.trim() || "Anonymous";
+  const message = document.getElementById("message").value.trim();
+
+  payBtn.disabled = true;
+  setStatus("Setting up payment…");
+
+  try {
+    const res = await fetch(`${API_BASE}/tips`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username,
+        payer_name: payerName,
+        message: message || null,
+        amount: selectedAmount,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Could not create tip");
+    }
+
+    const data = await res.json();
+
+    const options = {
+      key: data.razorpay_key_id,
+      amount: data.amount_paise,
+      currency: data.currency,
+      name: data.creator_display_name,
+      description: "StreamTips",
+      order_id: data.razorpay_order_id,
+      handler: function (response) {
+        // NOTE: this callback firing does NOT mean the tip is confirmed.
+        // The backend only marks it 'success' once Razorpay's webhook
+        // arrives and is verified — this is deliberate. We just tell
+        // the viewer their payment went through from Razorpay's side.
+        setStatus("Payment received! Thank you 🎉", "success");
+        payBtn.disabled = false;
+      },
+      modal: {
+        ondismiss: function () {
+          setStatus("Payment cancelled.", "error");
+          payBtn.disabled = false;
+        },
+      },
+      theme: { color: "#7c5cff" },
+    };
+
+    const rzp = new Razorpay(options);
+    rzp.on("payment.failed", function () {
+      setStatus("Payment failed. Try again.", "error");
+      payBtn.disabled = false;
+    });
+    rzp.open();
+    setStatus("");
+  } catch (err) {
+    setStatus(err.message, "error");
+    payBtn.disabled = false;
+  }
+});
+
+loadCreator();
+</script>
+
+</body>
+</html>
