@@ -4,6 +4,7 @@ Real-time tipping platform for streamers — see full plan in `docs/streamtips-p
 
 ## Day 1 status: DB schema + JWT auth + creator profile — DONE
 ## Day 2 status: Tip page + Razorpay order creation — DONE
+## Day 3 status: Webhook verification + idempotency — DONE
 
 ## Setup
 
@@ -23,6 +24,24 @@ uvicorn app.main:app --reload
 ```
 
 Then visit http://localhost:8000/docs for interactive API docs.
+
+## Testing the webhook locally (Day 3)
+
+Razorpay's servers can't reach `localhost` directly, so you need a tunnel:
+
+1. Install [ngrok](https://ngrok.com/download) (free tier is fine).
+2. With your server running on port 8000, in a separate terminal run:
+   ```bash
+   ngrok http 8000
+   ```
+   It gives you a public URL like `https://abcd1234.ngrok-free.app`.
+3. In the Razorpay Dashboard → Settings → Webhooks → Add New Webhook:
+   - URL: `https://abcd1234.ngrok-free.app/webhooks/razorpay`
+   - Active events: check **`payment.captured`**
+   - Set a webhook secret — copy it into your `.env` as `RAZORPAY_WEBHOOK_SECRET`, then restart uvicorn so it picks up the new value.
+4. Now complete a test payment through `frontend/tip.html` as in Day 2. Within a few seconds, Razorpay should hit your webhook, and you'll see the tip's `status` flip from `pending` to `success` in the `tips` table.
+
+**To verify idempotency actually works:** in the Razorpay Dashboard, find that webhook delivery under Webhooks → Logs, and use "Resend". Confirm the tip stays `success` (not duplicated, no error) and check your server logs for `"Duplicate webhook event ignored"`.
 
 ## Try the tip page
 
@@ -51,7 +70,7 @@ A client can never directly mark a tip as paid — only a verified webhook event
 |---|---|
 | 1 | DB schema + auth + profile CRUD — **done** |
 | 2 | Tip page + Razorpay order creation — **done** |
-| 3 | Webhook verification + idempotency + tip creation |
+| 3 | Webhook verification + idempotency + tip creation — **done** |
 | 4 | WebSocket server |
 | 5 | Overlay page |
 | 6 | End-to-end wiring + testing |

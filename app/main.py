@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth, users, public, tips
+from app.routers import auth, users, public, tips, webhooks
 
 app = FastAPI(title="StreamTips API", version="0.1.0")
 
@@ -17,6 +17,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(public.router)
 app.include_router(tips.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health")
