@@ -7,15 +7,14 @@ Real-time tipping platform for streamers — see full plan in `docs/streamtips-p
 ## Setup
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env
-# edit .env: set DATABASE_URL, JWT_SECRET_KEY, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET
+copy .env.example .env
 
-# create the database first (in psql): CREATE DATABASE streamtips;
-alembic revision --autogenerate -m "initial schema"
+# Configure .env
+
 alembic upgrade head
 
 uvicorn app.main:app --reload
