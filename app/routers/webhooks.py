@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -13,22 +14,24 @@ logger = logging.getLogger("streamtips.webhooks")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
+PAYMENT_CAPTURED = "payment.captured"
+
 
 @router.post("/razorpay", status_code=status.HTTP_200_OK)
-async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
+async def razorpay_webhook(request: Request, db: Session = Depends(get_db)) -> dict:
     """
-    This endpoint is the ONLY place a tip can move from 'pending' to
-    'success'. Nothing the client says anywhere else in the API can do
-    that — see POST /tips, which only ever creates 'pending' rows.
+    The only endpoint that can move a tip from 'pending' to 'success'.
+    POST /tips never does this — it only ever creates 'pending' rows.
 
-    Order of operations matters here:
-      1. Read raw bytes (signature is computed over the exact raw body —
-         parsing to JSON first and re-serializing would break verification
-         if key order or whitespace differs even slightly).
-      2. Verify signature BEFORE trusting any content of the payload.
-      3. Check idempotency (has this event_id been processed before)
-         via a DB unique constraint, not just an in-memory/app check.
-      4. Only then touch the tip row.
+    Order of operations is deliberate:
+      1. Read the raw request body and verify its HMAC-SHA256 signature
+         before trusting any content. Signing covers the exact raw
+         bytes, so parsing to JSON first and re-serializing later could
+         silently break verification.
+      2. Enforce idempotency via a DB unique constraint on event_id,
+         not an in-memory or purely application-level check, so it
+         holds up under concurrent duplicate deliveries.
+      3. Only then update the tip and broadcast to the overlay.
     """
     raw_body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature")
@@ -45,37 +48,22 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     event_type = payload.get("event", "unknown")
 
     if not event_id:
-        # Razorpay always sends one of these; if truly absent, reject rather
-        # than silently process an event we can't dedupe.
+        # Razorpay always sends one of these; if it's genuinely absent,
+        # reject rather than silently process an event we can't dedupe.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing event id",
         )
 
-    # --- Idempotency gate ---
-    # Try to insert the event row first. The unique constraint on
-    # event_id is the actual guarantee here: even under concurrent
-    # duplicate deliveries (Razorpay does retry webhooks), only one
-    # request can win this insert. The other gets IntegrityError and
-    # we treat it as "already handled" — no tip mutation happens twice.
-    event_row = WebhookEvent(event_id=event_id, event_type=event_type, processed=False)
-    db.add(event_row)
-    try:
-        db.flush()
-    except IntegrityError:
-        db.rollback()
+    if not _record_event_once(db, event_id, event_type):
         logger.info(f"Duplicate webhook event ignored: {event_id}")
         return {"status": "already_processed"}
 
-    # Only handle the event type we actually care about for V1.
-    if event_type != "payment.captured":
-        db.commit()  # still record we saw it, just nothing to do
+    if event_type != PAYMENT_CAPTURED:
+        db.commit()  # event recorded, nothing further to do for this type
         return {"status": "ignored", "event_type": event_type}
 
-    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
-    order_id = payment_entity.get("order_id")
-    payment_id = payment_entity.get("id")
-
+    order_id, payment_id = _extract_payment_ids(payload)
     if not order_id or not payment_id:
         db.rollback()
         raise HTTPException(
@@ -85,41 +73,71 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     tip = db.query(Tip).filter(Tip.payment_order_id == order_id).first()
     if tip is None:
-        # Event references an order we have no record of. Log and store
-        # the webhook_event as processed=False evidence, but don't error
-        # loudly back to Razorpay — 200 so it doesn't retry forever.
+        # Unknown order — log and acknowledge with 200 so Razorpay
+        # doesn't retry indefinitely for an order we'll never find.
         logger.error(f"Webhook for unknown order_id: {order_id}")
         db.commit()
         return {"status": "unknown_order"}
 
     if tip.status == TipStatus.success:
-        # Belt-and-suspenders: even if somehow two different event_ids
-        # referenced the same order, don't double-apply success.
-        event_row.processed = True
+        # Defense in depth: even if two different event_ids somehow
+        # referenced the same order, never re-apply success.
         db.commit()
         return {"status": "already_success"}
 
     tip.status = TipStatus.success
     tip.payment_id = payment_id
-    event_row.processed = True
+    db.query(WebhookEvent).filter(WebhookEvent.event_id == event_id).update({"processed": True})
     db.commit()
 
-    # Broadcast to the OBS overlay, if one is currently connected.
-    # Deliberately happens AFTER commit — the DB write is the source of
-    # truth regardless of whether anyone was watching live. If the
-    # overlay was offline, the tip is still recorded as successful;
-    # it just won't show a live alert. No retry/queue for missed
-    # alerts in V1 — that's an acceptable, documented scope cut.
-    creator = db.query(User).filter(User.id == tip.user_id).first()
-    if creator:
-        await manager.send_to_overlay(
-            creator.overlay_token,
-            {
-                "type": "TIP",
-                "name": tip.payer_name,
-                "amount": float(tip.amount),
-                "message": tip.message,
-            },
-        )
+    await _broadcast_tip(db, tip)
 
     return {"status": "processed", "tip_id": str(tip.id)}
+
+
+def _record_event_once(db: Session, event_id: str, event_type: str) -> bool:
+    """
+    Attempts to insert a WebhookEvent row with processed=False. Returns
+    False if event_id already exists (duplicate delivery), True if this
+    is the first time we've seen it. The unique constraint on event_id
+    is what makes this safe under concurrent requests, not this
+    function alone. Callers should flip `processed` to True once the
+    event has actually been acted on.
+    """
+    db.add(WebhookEvent(event_id=event_id, event_type=event_type, processed=False))
+    try:
+        db.flush()
+        return True
+    except IntegrityError:
+        db.rollback()
+        return False
+
+
+def _extract_payment_ids(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Pulls order_id and payment_id out of a Razorpay payment.captured payload."""
+    entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    return entity.get("order_id"), entity.get("id")
+
+
+async def _broadcast_tip(db: Session, tip: Tip) -> None:
+    """
+    Pushes the tip to the creator's OBS overlay over WebSocket, if one
+    is currently connected. Runs after the DB commit — the database is
+    the source of truth regardless of whether anyone was watching live.
+    A tip made while the overlay is offline is still recorded as
+    successful; it just won't produce a live alert. There's no
+    retry/queue for missed alerts in V1 — an accepted, documented cut.
+    """
+    creator = db.query(User).filter(User.id == tip.user_id).first()
+    if creator is None:
+        return
+
+    await manager.send_to_overlay(
+        creator.overlay_token,
+        {
+            "type": "TIP",
+            "name": tip.payer_name,
+            "amount": float(tip.amount),
+            "message": tip.message,
+        },
+    )
